@@ -5,44 +5,25 @@
 #include <inttypes.h>
 #include "ipsrvdb.h"
 
-struct ipsrvip {
-    uint64_t high;
-    uint64_t low;
+struct ipaddr {
+    unsigned char address[16];
 };
 
-typedef struct ipsrvip ipsrvip_t;
+typedef struct ipaddr ipaddr_t;
 
-char ipcmp(ipsrvip_t *a, ipsrvip_t *b) {
-    if (a->high == b->high) {
-        if (a->low == b->low) {
-            return 0;
-        } else if (a->low > b->low) {
-            return 1;
-        }
-        return -1;
-    } else if(a->high > b->high) {
-        return 1;
-    }
-    return -1;
-}
-
-ipsrvip_t *ip_to_int(char *ip) {
-    ipsrvip_t *ipint = (ipsrvip_t *)malloc(sizeof(ipsrvip_t));
-    memset(ipint, 0, sizeof(ipint));
-    ipint->low = htonl(inet_addr(ip));
-    if (ipint->low == INADDR_NONE) {
+ipaddr_t *ip_to_addr(char *ip) {
+    ipaddr_t *addr = (ipaddr_t *)malloc(sizeof(ipaddr_t));
+    memset(addr, 0, sizeof(ipaddr_t));
+    uint32_t ip4 = inet_addr(ip);
+    if (ip4 == INADDR_NONE) {
         struct in6_addr result;
         if (inet_pton(AF_INET6, ip, &result) == 1) { // success!
-            int i;
-            for (i=0; i<8; i++) {
-                ipint->high = (ipint->high << 8) + result.s6_addr[i];
-            }
-            for (i=8; i<16; i++) {
-                ipint->low = (ipint->low << 8) + result.s6_addr[i];
-            }
+            memcpy(addr->address, result.s6_addr, 16);
         }
+    } else {
+        memcpy(addr->address + 12, &ip4, 4);
     }
-    return ipint;
+    return addr;
 }
 
 ipsrvdb_t *ipsrv_open_database(char *filename) {
@@ -79,19 +60,38 @@ ipsrvdb_t *ipsrv_open_database(char *filename) {
     return db;
 }
 
+void ipsrv_close_database(ipsrvdb_t *db) {
+    if (db == NULL)
+        return;
+    if (db->index != NULL)
+        free(db->index);
+    if (db->data != NULL)
+        free(db->data);
+    if (db->header != NULL)
+        free(db->header);
+    if (db->date != NULL)
+        free(db->date);
+    if (db->description != NULL)
+        free(db->description);
+    free(db);
+}
+
 char *ipsrv_find(ipsrvdb_t *db, char *ip) {
-    ipsrvip_t *ipint = ip_to_int(ip);
-    uint64_t start = 0, 
+    char *ret = NULL;
+    ipaddr_t *addr = ip_to_addr(ip);
+    uint32_t start = 0, 
              mid = 0, 
              end = (db->index_size) - 1;
     while(start <= end) {
-        ipsrvip_t unpacked;
+        ipaddr_t unpacked;
+        memset(&unpacked, 0, sizeof(ipaddr_t));
         mid = (start + end) / 2;
-        memcpy(&(unpacked.high), db->index+mid*24, sizeof(uint64_t));
-        memcpy(&(unpacked.low), db->index+mid*24+8, sizeof(uint64_t));
-        if(ipcmp(&unpacked, ipint) > 0) {
+        memcpy(&(unpacked.address), (db->index)+mid*24, 16);
+
+        int cmp = memcmp(&unpacked, addr, 16);
+        if(cmp > 0) {
             end = mid;
-        } else if(ipcmp(&unpacked, ipint) < 0) {
+        } else if(cmp < 0) {
             start = mid;
             if(start == end - 1) {
                 uint32_t offset, len;
@@ -101,9 +101,10 @@ char *ipsrv_find(ipsrvdb_t *db, char *ip) {
                 char *data = (char *)malloc(datalen);
                 memset(data, 0, datalen);
                 memcpy(data, db->data+offset, len);
-                return data;
+                ret = data;
+                break;
             }
-        } else if(ipcmp(&unpacked, ipint) == 0) {
+        } else if(cmp == 0) {
             uint32_t offset, len;
             memcpy(&offset, (db->index)+mid*24+16, sizeof(uint32_t));
             memcpy(&len, db->index+mid*24+20, sizeof(uint32_t));
@@ -111,7 +112,11 @@ char *ipsrv_find(ipsrvdb_t *db, char *ip) {
             char *data = (char *)malloc(datalen);
             memset(data, 0, datalen);
             memcpy(data, db->data+offset, len);
-            return data;
+            ret = data;
+            break;
         }
     }
+
+    free(addr);
+    return ret;
 }
